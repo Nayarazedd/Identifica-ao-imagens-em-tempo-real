@@ -1,21 +1,18 @@
 """
-Scanner com YOLO — Detecção de objetos em tempo real via câmera usando Streamlit.
-Protótipo leve, single-file, pronto para deploy no Render.
-
-
-Observação de arquitetura: em nuvem (Render) o servidor não possui câmera física, então
-cv2.VideoCapture(0) não é viável. Para tempo real, a câmera do dispositivo do usuário é
-acessada pelo navegador via WebRTC (streamlit-webrtc) e cada frame é enviado ao servidor,
-onde o YOLO roda a inferência antes de o frame anotado retornar ao navegador.
+Scanner com Yolo
+-----------------
+Protótipo educacional de detecção de objetos em tempo real, usando
+Streamlit e YOLO (Ultralytics). A captura de imagem é feita pelo
+componente nativo st.camera_input, que aciona a câmera do
+NAVEGADOR do usuário (client-side) — essencial para funcionar em
+deploy na nuvem (Render), onde o servidor não possui câmera física.
 """
 
+from typing import Any
 
-import av
-import numpy as np
 import streamlit as st
+from PIL import Image
 from ultralytics import YOLO
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
-
 
 
 # ---------------------------------------------------------------------------
@@ -23,15 +20,15 @@ from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Scanner com Yolo", layout="centered")
 st.title("Scanner com Yolo")
-
+st.caption("Detecção de objetos em tempo real com YOLO + Streamlit")
 
 
 # ---------------------------------------------------------------------------
-# Carregamento do modelo YOLO (cacheado para evitar recarregar a cada rerun)
+# Carregamento do modelo (cacheado para não recarregar a cada interação)
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Carregando modelo YOLO...")
 def carregar_modelo(caminho_modelo: str = "yolov8n.pt") -> YOLO:
-    """Carrega e retorna o modelo YOLO especificado."""
+    """Carrega o modelo YOLO uma única vez e mantém em cache na sessão."""
     try:
         return YOLO(caminho_modelo)
     except Exception as erro:
@@ -39,44 +36,48 @@ def carregar_modelo(caminho_modelo: str = "yolov8n.pt") -> YOLO:
         st.stop()
 
 
+# ---------------------------------------------------------------------------
+# Inferência: recebe a imagem capturada e retorna a imagem anotada + detecções
+# ---------------------------------------------------------------------------
+def detectar_objetos(modelo: YOLO, imagem: Image.Image) -> tuple[Any, list[str]]:
+    """Executa a inferência do YOLO sobre a imagem e formata os resultados."""
+    resultado = modelo.predict(imagem, verbose=False)[0]
+    imagem_anotada = resultado.plot()  # array BGR com as caixas desenhadas
 
-modelo = carregar_modelo()
-
+    deteccoes = [
+        f"{modelo.names[int(caixa.cls[0])]} — {float(caixa.conf[0]):.0%} de confiança"
+        for caixa in resultado.boxes
+    ]
+    return imagem_anotada, deteccoes
 
 
 # ---------------------------------------------------------------------------
-# Processador de vídeo: recebe cada frame do stream e aplica a inferência YOLO
+# Interface: botão que libera o widget de câmera do navegador
 # ---------------------------------------------------------------------------
-class ProcessadorYolo(VideoProcessorBase):
-    """Executa detecção de objetos em cada frame recebido da câmera do usuário."""
+if "camera_ativa" not in st.session_state:
+    st.session_state["camera_ativa"] = False
 
+if st.button("Abrir câmera"):
+    st.session_state["camera_ativa"] = True
 
-    def __init__(self) -> None:
-        self.modelo = modelo
+if st.session_state["camera_ativa"]:
+    captura = st.camera_input("Aponte a câmera para o objeto e capture")
 
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+    if captura is not None:
         try:
-            imagem_bgr = frame.to_ndarray(format="bgr24")
-            resultados = self.modelo.predict(source=imagem_bgr, verbose=False)
-            imagem_anotada = resultados[0].plot()
-            return av.VideoFrame.from_ndarray(imagem_anotada, format="bgr24")
-        except Exception:
-            # Em caso de falha na inferência de um frame, devolve o frame original
-            # para não interromper o streaming.
-            return frame
+            imagem_original = Image.open(captura)
+        except Exception as erro:
+            st.error(f"Não foi possível ler a imagem capturada: {erro}")
+        else:
+            modelo_yolo = carregar_modelo()
+            imagem_anotada, deteccoes = detectar_objetos(modelo_yolo, imagem_original)
 
+            # Pós-processamento e visualização dos resultados
+            st.image(imagem_anotada, channels="BGR", caption="Objetos detectados")
 
-
-# ---------------------------------------------------------------------------
-# Botão/controle para abrir a câmera e iniciar a detecção em tempo real
-# webrtc_streamer já fornece nativamente o botão de "Start"/"Stop" da câmera.
-# ---------------------------------------------------------------------------
-webrtc_streamer(
-    key="scanner-yolo",
-    mode=WebRtcMode.SENDRECV,
-    video_processor_factory=ProcessadorYolo,
-    media_stream_constraints={"video": True, "audio": False},
-    async_processing=True,
-)
-
+            st.subheader("Objetos encontrados")
+            if deteccoes:
+                for item in deteccoes:
+                    st.write(f"- {item}")
+            else:
+                st.info("Nenhum objeto foi identificado nesta captura.")
